@@ -1,7 +1,8 @@
 import json
 import os
+import re
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Dict
 
 from elasticsearch import Elasticsearch
 from sentence_splitter import SentenceSplitter
@@ -22,17 +23,24 @@ splitter = SentenceSplitter(language="en")
 def create_index(es: Elasticsearch, index_name: str) -> None:
     # Create the index if it does not exist.
     if es.indices.exists(index=index_name):
-        return
+        es.indices.delete(index=index_name)
 
     mapping = {
         "mappings": {
             "properties": {
                 "doc_id": {"type": "keyword"},
                 "chunk_id": {"type": "keyword"},
-                # TODO: Complete the mapping with the required fields and types.
+                "title": {"type": "text"},
+                "description": {"type": "text"},
+                "authors": {"type": "keyword"},
+                "subjects": {"type": "keyword"},
+                "language": {"type": "keyword"},
+                "first_publish_year": {"type": "integer"},
+                 # TODO: Complete the mapping with the required fields and types.
                 "embedding": {
                     "type": "dense_vector",
-                    "dims": 384 # Adjust the dimensions where required.
+                    "dims": 384,
+                    "index": True
                 }
             }
         }
@@ -63,9 +71,15 @@ def split_into_chunks(text: str, max_sentences: int = 5) -> List[str]:
 
 
 def generate_embedding(text: str) -> List[float]:
-    # TODO: Create the required code to generate text embeddings.
-    return None
+    return model.encode(
+        text
+    ).tolist()
 
+def clean_string(string: Any) -> str:
+    text = re.sub(r'[^\x00-\x7F]+', ' ', string)
+    text = re.sub(r'[-.:,!?\(\)]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 def proccess_documents(document: Dict[str, Any]) -> List[Dict[str, Any]]:
     # TODO: Complete the required code to process each document:
@@ -74,38 +88,52 @@ def proccess_documents(document: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Add the embeddings to a new document along with the remaining fields
     # Filter and replace non-ASCII characters
     # Ensure that subjects are capitalized
-
-
     doc_id = document.get("id")
     title = document.get("title", "")
     description = document.get("description", "")
+    authors = document.get("authors", [])
+    subjects = document.get("subjects", [])
+    language = document.get("language", [])
+    year = document.get("first_publish_year")
 
     if not doc_id or not description:
         raise ValueError("Document must contain at least 'id' and 'description'")
 
-    chunks = split_into_chunks(description)
-    result = []
+    clean_title = clean_string(title)
+    clean_description = clean_string(description)
+    clean_authors = [clean_string(a) for a in authors]
+    clean_subjects = [clean_string(s).title() for s in subjects]
+    clean_language = [clean_string(l) for l in language]
 
+    chunks = split_into_chunks(clean_description)
+
+    result = []
     for idx, chunk in enumerate(chunks):
-        embedding = generate_embedding(chunk)
-        result.append({
+        clean_chunk = clean_string(chunk)
+        embedding = generate_embedding(clean_chunk)
+        built_doc = {
             "doc_id": str(doc_id),
             "chunk_id": f"{doc_id}-{idx}",
-            "title": title,
-            "description": chunk,
+            "title": clean_title,
+            "description": clean_description,
+            "authors": clean_authors,
+            "subjects": clean_subjects,
+            "language": clean_language,
+            "first_publish_year": year,
+            "content": clean_chunk,
             "embedding": embedding
-        })
+        }
+        result.append(built_doc)
 
     return result
 
 
 def index_documents(es: Elasticsearch, index_name: str, docs: List[Dict[str, Any]]) -> None:
-    # TODO: Index documents into Elasticsearch
-    return
-
+     # TODO: Index documents into Elasticsearch
+    for doc in docs:
+        es.index(index=index_name, id=doc["chunk_id"], document=doc)
 
 def semantic_search(es: Elasticsearch, index_name: str, query_text: str, k: int = 3) -> Dict[str, Any]:
-    # Query to perform semantic search
     query_vector = generate_embedding(query_text)
 
     body = {
@@ -136,8 +164,24 @@ def main() -> None:
 
     print("Semantic search: examples")
 
-    # TODO: Create several semantic search queries and print the results.
-    # Use the function semantic_search()
+    queries = [
+        "space exploration and stars",
+        "science fictions and magic",
+        "history of world war",
+    ]
+
+    for query in queries:
+        print(f"\nQuery: {query}")
+        response = semantic_search(es, INDEX_NAME, query, k=3)
+        hits = response.get("hits", {}).get("hits", [])
+
+        for hit in hits:
+            source = hit.get("_source", {})
+            print(
+                f"doc_id={source.get('doc_id')} "
+                f"title={source.get('title')} "
+                f"chunks={source.get('content', '')[:120]}"
+            )
 
 
 if __name__ == "__main__":
